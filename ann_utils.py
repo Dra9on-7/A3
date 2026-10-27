@@ -41,6 +41,7 @@ def make_flat(d, metric):
 
 def load_dataset(name):
     cfg = DATASETS[name]
+    print(f"Loading {name} dataset from {cfg['path']} (metric={cfg['metric']})")
     with h5py.File(cfg["path"], "r") as f:
         train = np.ascontiguousarray(f["train"][:], dtype=np.float32)
         test = np.ascontiguousarray(f["test"][:], dtype=np.float32)
@@ -143,6 +144,11 @@ def set_nprobe(index, nprobe):
     faiss.extract_index_ivf(index).nprobe = int(nprobe)
 
 
+def set_efsearch(index, ef):
+    """Set efSearch on an HNSW index (flat or scalar-quantised storage)."""
+    index.hnsw.efSearch = int(ef)
+
+
 def coarse_centroids(ev, nlist, niter=25, spherical=False, seed=1234):
     """Train the IVF coarse quantizer (k-means) exactly the way IndexIVFFlat does and return
     (centroids, seconds). Lets IVF-PQ reuse the very same partition for every PQ setting, so that
@@ -157,16 +163,19 @@ def coarse_centroids(ev, nlist, niter=25, spherical=False, seed=1234):
 
 
 # --------------------------------------------------------------------------- timing
-def time_single_query(index, queries, k=K, n_queries=500, reps=3, warmup=20, collect_ivf_stats=False):
+def time_single_query(index, queries, k=K, n_queries=500, reps=3, warmup=20, collect_stats=None):
     """Queries per second with ONE query per search() call on ONE thread.
-    Median over `reps` passes of the first n_queries queries (assignment protocol)."""
+    Median over `reps` passes of the first n_queries queries (assignment protocol).
+    collect_stats: None, "ivf" (FAISS IVF counters) or "hnsw" (FAISS HNSW counters)."""
     q = np.ascontiguousarray(queries[:n_queries])
     faiss.omp_set_num_threads(1)
     try:
         for i in range(min(warmup, len(q))):
             index.search(q[i:i + 1], k)
-        if collect_ivf_stats:
+        if collect_stats == "ivf":
             faiss.cvar.indexIVF_stats.reset()
+        elif collect_stats == "hnsw":
+            faiss.cvar.hnsw_stats.reset()
         qps = []
         for _ in range(reps):
             t0 = time.perf_counter()
@@ -174,20 +183,25 @@ def time_single_query(index, queries, k=K, n_queries=500, reps=3, warmup=20, col
                 index.search(q[i:i + 1], k)
             qps.append(len(q) / (time.perf_counter() - t0))
         extra = {}
-        if collect_ivf_stats:
+        if collect_stats == "ivf":
             s = faiss.cvar.indexIVF_stats
             if s.nq > 0:
                 extra = dict(dist_comps_per_query=s.ndis / s.nq,        # vectors compared per query
                              quantize_ms_per_query=s.quantization_time / s.nq,  # find nearest centroids
                              scan_ms_per_query=s.search_time / s.nq)             # scan inverted lists
+        elif collect_stats == "hnsw":
+            s = faiss.cvar.hnsw_stats
+            n_issued = reps * len(q)
+            extra = dict(dist_comps_per_query=s.ndis / n_issued,        # vectors compared per query
+                         hops_per_query=s.nhops / n_issued)             # graph nodes expanded per query
     finally:
         faiss.omp_set_num_threads(MAX_THREADS)
     return float(np.median(qps)), qps, extra
 
 
 def run_sweep(index, ev, setter, values, k=K, n_time_q=500, reps=3, stop_recall=0.99,
-              plateau_gain=0.002, ivf_stats=True, label="", param_name="param"):
-    """Sweep one search-time parameter (nprobe / efSearch), upwards.
+              plateau_gain=0.002, stats="ivf", label="", param_name="param"):
+    """Sweep one search-time parameter (nprobe / efSearch), upwards. stats: "ivf", "hnsw" or None.
     Recall is computed on ALL test queries (one batched call, results do not depend on batching);
     speed is measured one query at a time on one thread. Stops once recall >= stop_recall, or when
     recall has stopped improving (a ceiling, typical for quantised indexes)."""
@@ -197,7 +211,7 @@ def run_sweep(index, ev, setter, values, k=K, n_time_q=500, reps=3, stop_recall=
         _, I = index.search(ev.test, k)
         rec = ev.recall(I)
         qps, all_qps, extra = time_single_query(index, ev.test, k, n_time_q, reps,
-                                                collect_ivf_stats=ivf_stats)
+                                                collect_stats=stats)
         row = dict(param=v, recall=rec, qps=qps, ms_per_query=1e3 / qps,
                    qps_min=min(all_qps), qps_max=max(all_qps), **extra)
         rows.append(row)
@@ -301,6 +315,14 @@ def plot_tradeoff(results, baselines, index_name, outfile=None):
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
         fig.savefig(outfile, dpi=150)
     return fig
+
+
+def int_cols(df, prefixes=("ef@", "nprobe@")):
+    """Show parameter columns that contain gaps (target not reached) as integers, not floats."""
+    for c in df.columns:
+        if c.startswith(prefixes):
+            df[c] = df[c].astype("Int64")
+    return df
 
 
 def save_df(df, filename):
