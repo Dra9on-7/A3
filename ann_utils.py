@@ -41,7 +41,6 @@ def make_flat(d, metric):
 
 def load_dataset(name):
     cfg = DATASETS[name]
-    print(f"Loading {name} dataset from {cfg['path']} (metric={cfg['metric']})")
     with h5py.File(cfg["path"], "r") as f:
         train = np.ascontiguousarray(f["train"][:], dtype=np.float32)
         test = np.ascontiguousarray(f["test"][:], dtype=np.float32)
@@ -114,6 +113,47 @@ class Evaluator:
         return recall_from_dists(I[:, :self.k], exact_dists(I[:, :self.k], self.train, self.test,
                                                             self.metric),
                                  self.gt_d, self.k, per_query=per_query)
+
+
+class ArrayEvaluator(Evaluator):
+    """Same interface as Evaluator, but for arrays you generated yourself (no hdf5 file).
+    The exact top-k reference is computed with FAISS exact search on exactly these arrays."""
+
+    def __init__(self, name, train, test, metric="l2", k=K):
+        self.name, self.k, self.metric = name, k, metric
+        self.train = np.ascontiguousarray(train, dtype=np.float32)
+        self.test = np.ascontiguousarray(test, dtype=np.float32)
+        self.n, self.d = self.train.shape
+        flat = make_flat(self.d, metric)
+        flat.add(self.train)
+        t0 = time.perf_counter()
+        _, self.gt_ids = flat.search(self.test, k)
+        self.exact_search_s = time.perf_counter() - t0
+        self.ref_source = "FAISS exact search on the generated data"
+        self.gt_d = exact_dists(self.gt_ids, self.train, self.test, metric)
+
+
+def cost_at_recall(df, target, cols, param_col="param"):
+    """Interpolate (log-linear) the columns `cols` of a sweep at EXACTLY recall == target.
+    Using the first measured point with recall >= target would overshoot by a different amount
+    in every run (0.950 in one, 0.966 in another), which contaminates comparisons.
+    Returns None if the target was never reached. 'floor_limited' is True when even the weakest
+    setting of the sweep already reaches the target (the cost is then only an upper bound)."""
+    d = df.sort_values(param_col)
+    r = d["recall"].to_numpy()
+    if not (r >= target).any():
+        return None
+    i = int(np.argmax(r >= target))
+    if i == 0:
+        return {**{c: float(d[c].iloc[0]) for c in cols}, "floor_limited": True}
+    w = (target - r[i - 1]) / (r[i] - r[i - 1])
+    out = {}
+    for c in cols:
+        lo, hi = float(d[c].iloc[i - 1]), float(d[c].iloc[i])
+        out[c] = (float(np.exp(np.log(lo) + w * (np.log(hi) - np.log(lo)))) if lo > 0 and hi > 0
+                  else lo + w * (hi - lo))
+    out["floor_limited"] = False
+    return out
 
 
 # --------------------------------------------------------------------------- build helpers
