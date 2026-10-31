@@ -1,0 +1,9 @@
+faiss-cpu
+h5py
+ipykernel
+jupyter
+matplotlib
+nbconvert
+numpy
+pandas
+tqdm

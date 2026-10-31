@@ -1,0 +1,7 @@
+{
+  "dataset": "glove",
+  "qps": 32.58939883175023,
+  "ms_per_query": 30.684824999771084,
+  "n_queries": 100,
+  "reps": 3
+}

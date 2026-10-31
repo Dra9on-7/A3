@@ -20,8 +20,8 @@ import numpy as np
 import pandas as pd
 
 K = 10
-RAW_DIR = "./data/raw"
-PROC_DIR = "./data/processed"
+RAW_DIR = "../data/raw"
+PROC_DIR = "../data/processed"
 DATASETS = {
     "sift":  dict(path=f"{RAW_DIR}/sift-128-euclidean.hdf5", metric="l2"),
     "glove": dict(path=f"{RAW_DIR}/glove-100-angular.hdf5",    metric="angular"),
